@@ -524,8 +524,9 @@ function admin_layout_start(string $active, array $user, string $title, string $
     echo '</div>';
     echo '<nav class="admin-nav">';
     echo '<a href="index.php?page=admin" class="' . ($active==='users'?'active':'') . '">👥 Пользователи</a>';
-    echo '<a href="index.php?page=admin_cars" class="' . ($active==='cars'?'active':'') . '">🚗 Автомобили</a>';
-    echo '<a href="index.php?page=admin_logs" class="' . ($active==='logs'?'active':'') . '">📋 Журнал действий</a>';
+   echo '<a href="index.php?page=admin_cars" class="' . ($active==='cars'?'active':'') . '">🚗 Автомобили</a>';
+echo '<a href="index.php?page=admin_notes_download" class="' . ($active==='notes_dl'?'active':'') . '">⬇ Скачать API notes</a>';
+echo '<a href="index.php?page=admin_logs" class="' . ($active==='logs'?'active':'') . '">📋 Журнал действий</a>';
     echo '<div class="admin-nav-sep"></div>';
     echo '<a href="index.php?page=profile">👤 Мой профиль</a>';
     echo '<a href="index.php">🏠 На сайт</a>';
@@ -1029,6 +1030,7 @@ elseif ($page === 'admin_logs'):
     ')->fetchAll();
 
     admin_layout_start('logs', $user, 'Журнал действий', 'Последние 200 записей');
+
 ?>
 
     <div class="admin-card">
@@ -1051,7 +1053,98 @@ elseif ($page === 'admin_logs'):
     </div>
 
 <?php admin_layout_end(); ?>
+<?php
+/* ============================================================
+   ADMIN — ЗАМЕТКИ (API /notes) + экспорт
+   ============================================================ */
+elseif ($page === 'admin_notes'):
 
+    $notes = [];
+    $dbError = null;
+    try {
+        $st = db()->query("
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+            ORDER BY n.id
+        ");
+        $notes = $st->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        $dbError = $e->getMessage();
+    }
+
+    admin_layout_start('notes', $user, 'Заметки (API)', 'Данные и экспорт для GET /notes');
+?>
+
+    <?php if ($dbError): ?>
+        <div class="alert err">Ошибка БД: <?= e($dbError) ?></div>
+    <?php endif; ?>
+
+    <!-- Ссылки на сам API -->
+    <div style="display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px">
+        <a href="index.php?page=admin_notes" class="btn ghost small">↻ Обновить</a>
+        <a href="/notes" target="_blank" class="btn primary small">🔗 Открыть API /notes</a>
+        <a href="/api/notes" target="_blank" class="btn ghost small">🔗 /api/notes</a>
+    </div>
+
+    <!-- Блок экспорта -->
+    <div class="admin-card admin-form-card" style="margin-bottom:20px">
+        <h3 style="margin-bottom:16px">⬇ Скачать данные API /notes</h3>
+        <p class="text-dim" style="margin-bottom:20px">
+            Выберите формат — файл будет сформирован из тех же данных, что отдаёт API.
+        </p>
+
+        <div style="display:flex; gap:12px; flex-wrap:wrap">
+            <a href="index.php?page=admin_notes_export&format=json"
+               class="btn primary">📄 JSON</a>
+            <a href="index.php?page=admin_notes_export&format=csv"
+               class="btn ghost">📊 CSV</a>
+            <a href="index.php?page=admin_notes_export&format=xml"
+               class="btn ghost">🧩 XML</a>
+            <a href="index.php?page=admin_notes_export&format=sql"
+               class="btn ghost">🗄 SQL</a>
+        </div>
+
+        <p class="text-dim" style="margin-top:16px; font-size:12px">
+            JSON — как отдаёт API; CSV — для Excel (разделитель «;»);
+            XML — структурированный; SQL — готовый INSERT в таблицу <code>notes</code>.
+        </p>
+    </div>
+
+    <!-- Таблица заметок -->
+    <div class="admin-card">
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>title_user</th>
+                    <th>content</th>
+                    <th>formatted_date</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($notes as $n): ?>
+                <tr>
+                    <td><code class="vin"><?= e($n['id']) ?></code></td>
+                    <td><b><?= e($n['title_user']) ?></b></td>
+                    <td><?= e($n['content']) ?></td>
+                    <td><span class="badge green"><?= e($n['formatted_date']) ?></span></td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$notes): ?>
+                <tr><td colspan="4" class="text-center text-muted" style="padding:40px">
+                    Заметок пока нет. Добавьте записи в таблицу <code>notes</code>.
+                </td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+
+<?php admin_layout_end(); ?>
 <?php
 /* ============================================================
    ПУБЛИЧНЫЕ СТРАНИЦЫ
