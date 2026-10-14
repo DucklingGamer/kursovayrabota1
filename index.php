@@ -7,6 +7,192 @@
 require __DIR__ . '/config.php';
 require __DIR__ . '/functions.php';
 
+/* ============================================================
+   API: GET /notes  и  GET /api/notes
+   КИМ 09.02.07-5-2027
+   ============================================================ */
+$reqUri = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+if (in_array(rtrim($reqUri, '/'), ['/notes', '/api/notes'], true)) {
+
+    header('Content-Type: application/json; charset=utf-8');
+
+    // --- 1. Разрешаем только GET, иначе 400 ---
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') {
+        http_response_code(400);
+        echo json_encode(['error' => 'Некорректный запрос: разрешён только GET'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    // --- 2. Валидация параметров ---
+    $allowedParams = ['limit', 'id_user'];
+    foreach ($_GET as $key => $value) {
+        if (!in_array($key, $allowedParams, true)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Некорректный параметр: $key"], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        if (is_array($value)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Некорректный тип параметра: $key"], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        if ($value !== '' && (!ctype_digit((string)$value) || (int)$value <= 0)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Некорректное значение параметра: $key"], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+
+    try {
+        $sql = "
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+        ";
+        $params = [];
+        if (!empty($_GET['id_user'])) {
+            $sql .= " WHERE n.id_user = ?";
+            $params[] = (int)$_GET['id_user'];
+        }
+        $sql .= " ORDER BY n.id";
+        if (!empty($_GET['limit'])) {
+            $sql .= " LIMIT " . (int)$_GET['limit'];
+        }
+
+        $st = db()->prepare($sql);
+        $st->execute($params);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        http_response_code(200);
+        echo json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => 'Ошибка подключения к базе данных'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+/* ============================================================
+   СКАЧИВАНИЕ API /notes — JSON / CSV / XML / SQL
+   ============================================================ */
+if (($_GET['page'] ?? '') === 'admin_notes_download') {
+
+    $u = current_user();
+    if (!$u || $u['role_code'] !== 'admin') {
+        http_response_code(403);
+        exit('Доступ запрещён');
+    }
+
+    $format  = strtolower($_GET['format'] ?? 'json');
+    $allowed = ['json', 'csv', 'xml', 'sql'];
+    if (!in_array($format, $allowed, true)) {
+        http_response_code(400);
+        exit('Некорректный формат');
+    }
+
+    try {
+        $st = db()->query("
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+            ORDER BY n.id
+        ");
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        $filename = 'api_notes_' . date('Y-m-d_His') . '.' . $format;
+
+        if ($format === 'json') {
+            header('Content-Type: application/json; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            echo json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            exit;
+        }
+
+        if ($format === 'csv') {
+            header('Content-Type: text/csv; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            $out = fopen('php://output', 'w');
+            fwrite($out, "\xEF\xBB\xBF");
+            fputcsv($out, ['id', 'title_user', 'content', 'formatted_date'], ';');
+            foreach ($rows as $r) {
+                fputcsv($out, [$r['id'], $r['title_user'], $r['content'], $r['formatted_date']], ';');
+            }
+            fclose($out);
+            exit;
+        }
+
+        if ($format === 'xml') {
+            header('Content-Type: application/xml; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            $xml = new SimpleXMLElement('<?xml version="1.0" encoding="UTF-8"?><notes/>');
+            foreach ($rows as $r) {
+                $node = $xml->addChild('note');
+                $node->addChild('id', htmlspecialchars((string)$r['id']));
+                $node->addChild('title_user', htmlspecialchars((string)$r['title_user']));
+                $node->addChild('content', htmlspecialchars((string)$r['content']));
+                $node->addChild('formatted_date', htmlspecialchars((string)$r['formatted_date']));
+            }
+            echo $xml->asXML();
+            exit;
+        }
+
+        if ($format === 'sql') {
+            header('Content-Type: application/sql; charset=utf-8');
+            header('Content-Disposition: attachment; filename="' . $filename . '"');
+            $sql  = "-- Экспорт таблицы notes (API /notes)\n";
+            $sql .= "-- Дата: " . date('Y-m-d H:i:s') . "\n\n";
+            $sql .= "INSERT INTO notes (id, title, content, id_user, created_at) VALUES\n";
+
+            $raw = db()->query("SELECT id, title, content, id_user, created_at FROM notes ORDER BY id")
+                       ->fetchAll(PDO::FETCH_ASSOC);
+            $vals = [];
+            foreach ($raw as $r) {
+                $vals[] = sprintf("(%s, %s, %s, %s, %s)",
+                    (int)$r['id'],
+                    db()->quote($r['title']),
+                    db()->quote($r['content']),
+                    (int)$r['id_user'],
+                    db()->quote($r['created_at'])
+                );
+            }
+            $sql .= implode(",\n", $vals) . ";\n";
+            echo $sql;
+            exit;
+        }
+
+    } catch (Throwable $e) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'Ошибка подключения к базе данных'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+/* ============================================================
+   АВТОСБРОС ПРОСРОЧЕННЫХ БЛОКИРОВОК (15 минут)
+   ============================================================ */
+try {
+    db()->exec('
+        UPDATE user
+        SET failed_attempts = 0,
+            locked_until    = NULL
+        WHERE locked_until IS NOT NULL
+          AND locked_until <= NOW()
+    ');
+} catch (Throwable $e) {
+    // не критично — просто игнорируем
+}
+
 $page   = get('page', '');
 $action = post('action', get('action', ''));
 
@@ -40,7 +226,9 @@ if ($action === 'login' && is_post()) {
     }
 
     $st = db()->prepare('
-        SELECT u.user_id, u.password_hash, s.code AS status_code
+        SELECT u.user_id, u.password_hash,
+               u.failed_attempts, u.locked_until,
+               s.code AS status_code
         FROM user u
         JOIN user_status s ON s.status_id = u.status_id
         WHERE u.login = ?
@@ -57,21 +245,67 @@ if ($action === 'login' && is_post()) {
         redirect('index.php?page=login');
     }
     if ($u['status_code'] === 'blocked') {
-        $_SESSION['login_error'] = 'Аккаунт заблокирован';
-        redirect('index.php?page=login');
-    }
-    if (!password_verify($password, $u['password_hash'])) {
-        db()->prepare('UPDATE user SET failed_attempts = failed_attempts + 1 WHERE user_id = ?')
-            ->execute([$u['user_id']]);
-        log_action($login, 'Неудачная попытка входа', (int)$u['user_id']);
-        $_SESSION['login_error'] = 'Неверный логин или пароль';
+        $_SESSION['login_error'] = 'Аккаунт заблокирован администратором';
         redirect('index.php?page=login');
     }
 
+    // Проверка временной блокировки (15 минут после 3 неудач)
+    if (!empty($u['locked_until'])) {
+        $lockedUntil = strtotime($u['locked_until']);
+        $now         = time();
+
+        if ($lockedUntil > $now) {
+            $leftMin = (int)ceil(($lockedUntil - $now) / 60);
+            $_SESSION['login_error'] = "Слишком много неудачных попыток. Попробуйте через {$leftMin} мин.";
+            redirect('index.php?page=login');
+        } else {
+            // Время истекло — блокировка снимается сама
+            db()->prepare('UPDATE user SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?')
+                ->execute([(int)$u['user_id']]);
+            $u['failed_attempts'] = 0;
+            $u['locked_until']    = null;
+        }
+    }
+
+    if (!password_verify($password, $u['password_hash'])) {
+
+        $attempts = (int)$u['failed_attempts'] + 1;
+
+        if ($attempts >= 3) {
+            db()->prepare('
+                UPDATE user
+                SET failed_attempts = 0,
+                    locked_until    = DATE_ADD(NOW(), INTERVAL 15 MINUTE)
+                WHERE user_id = ?
+            ')->execute([(int)$u['user_id']]);
+
+            log_action($login, 'Аккаунт заблокирован на 15 минут (3 неудачных попытки)', (int)$u['user_id']);
+            $_SESSION['login_error'] = 'Слишком много неудачных попыток. Аккаунт заблокирован на 15 минут.';
+            redirect('index.php?page=login');
+        }
+
+        db()->prepare('UPDATE user SET failed_attempts = ? WHERE user_id = ?')
+            ->execute([$attempts, (int)$u['user_id']]);
+
+        log_action($login, "Неудачная попытка входа ($attempts/3)", (int)$u['user_id']);
+
+        $left = 3 - $attempts;
+        $_SESSION['login_error'] = "Неверный логин или пароль. Осталось попыток: $left";
+        redirect('index.php?page=login');
+    }
+
+    // --- Успешный вход ---
     $_SESSION['user_id'] = (int)$u['user_id'];
     unset($_SESSION['captcha_order']);
-    db()->prepare('UPDATE user SET failed_attempts = 0, last_login_at = NOW() WHERE user_id = ?')
-        ->execute([(int)$u['user_id']]);
+
+    db()->prepare('
+        UPDATE user
+        SET failed_attempts = 0,
+            locked_until    = NULL,
+            last_login_at   = NOW()
+        WHERE user_id = ?
+    ')->execute([(int)$u['user_id']]);
+
     log_action($login, 'Успешный вход', (int)$u['user_id']);
 
     $role = db()->prepare('SELECT r.code FROM user u JOIN user_role r ON r.role_id = u.role_id WHERE u.user_id = ?');
@@ -324,7 +558,6 @@ if ($action === 'car_save' && is_post()) {
         redirect('index.php?page=admin_car_form' . ($id ? "&id=$id" : ''));
     }
 
-    // --- Загрузка картинки ---
     $newImagePath = null;
     $oldImagePath = null;
 
@@ -344,7 +577,6 @@ if ($action === 'car_save' && is_post()) {
         }
     }
 
-    // Хотим удалить текущую картинку
     $removeImage = post('remove_image') === '1';
     if ($removeImage && $oldImagePath && !$newImagePath) {
         delete_car_image($oldImagePath);
@@ -397,7 +629,7 @@ if ($action === 'car_delete' && is_post()) {
    ============================================================ */
 $user = current_user();
 $authPages   = ['login', 'register'];
-$adminPages  = ['admin', 'admin_cars', 'admin_car_form', 'admin_logs', 'admin_users'];
+$adminPages  = ['admin', 'admin_cars', 'admin_car_form', 'admin_logs', 'admin_users', 'admin_notes', 'admin_notes_download'];
 $userPages   = ['profile'];
 $publicPages = ['home','cars','about','promo','contacts','dashboard'];
 
@@ -525,6 +757,7 @@ function admin_layout_start(string $active, array $user, string $title, string $
     echo '<nav class="admin-nav">';
     echo '<a href="index.php?page=admin" class="' . ($active==='users'?'active':'') . '">👥 Пользователи</a>';
     echo '<a href="index.php?page=admin_cars" class="' . ($active==='cars'?'active':'') . '">🚗 Автомобили</a>';
+    echo '<a href="index.php?page=admin_notes" class="' . ($active==='notes'?'active':'') . '">📝 Заметки (API)</a>';
     echo '<a href="index.php?page=admin_logs" class="' . ($active==='logs'?'active':'') . '">📋 Журнал действий</a>';
     echo '<div class="admin-nav-sep"></div>';
     echo '<a href="index.php?page=profile">👤 Мой профиль</a>';
@@ -570,6 +803,7 @@ if ($page === 'profile'):
             <?php if ($isAdmin): ?>
                 <a href="index.php?page=admin">👥 Пользователи</a>
                 <a href="index.php?page=admin_cars">🚗 Автомобили</a>
+                <a href="index.php?page=admin_notes">📝 Заметки (API)</a>
                 <a href="index.php?page=admin_logs">📋 Журнал действий</a>
                 <div class="admin-nav-sep"></div>
             <?php else: ?>
@@ -693,6 +927,7 @@ if ($page === 'profile'):
                         <tr><td><b>Последний вход</b></td><td><?= e($user['last_login_at'] ?? '—') ?></td></tr>
                         <tr><td><b>Пароль изменён</b></td><td><?= e($user['password_changed_at'] ?? '—') ?></td></tr>
                         <tr><td><b>Неудачных попыток</b></td><td><?= (int)$user['failed_attempts'] ?></td></tr>
+                        <tr><td><b>Заблокирован до</b></td><td><?= e($user['locked_until'] ?? '—') ?></td></tr>
                     </tbody>
                 </table>
                 <div class="admin-form-actions">
@@ -712,7 +947,7 @@ elseif ($page === 'admin' || $page === 'admin_users'):
         SELECT u.user_id, u.login, u.fio, u.email,
                r.name AS role_name, r.code AS role_code,
                s.code AS status_code, s.name AS status_name,
-               u.created_at
+               u.created_at, u.locked_until, u.failed_attempts
         FROM user u
         JOIN user_role   r ON r.role_id   = u.role_id
         JOIN user_status s ON s.status_id = u.status_id
@@ -784,8 +1019,13 @@ elseif ($page === 'admin' || $page === 'admin_users'):
                                 'deleted' => 'gray',
                                 default   => 'gray',
                             };
+
+                            $tempLocked = !empty($u['locked_until']) && strtotime($u['locked_until']) > time();
                         ?>
                         <span class="badge <?= $cls ?>"><?= e($u['status_name']) ?></span>
+                        <?php if ($tempLocked): ?>
+                            <br><span class="badge red" style="margin-top:6px">⏱ до <?= e(date('H:i', strtotime($u['locked_until']))) ?></span>
+                        <?php endif; ?>
                     </td>
                     <td><?= e(date('d.m.Y', strtotime($u['created_at']))) ?></td>
                     <td class="row-actions">
@@ -816,19 +1056,21 @@ elseif ($page === 'admin' || $page === 'admin_users'):
                                     <input type="hidden" name="user_id" value="<?= (int)$u['user_id'] ?>">
                                     <button class="btn ghost small">↺ Восстановить</button>
                                 </form>
-                            <?php elseif ($u['status_code'] === 'blocked'): ?>
+                            <?php elseif ($u['status_code'] === 'blocked' || $tempLocked): ?>
                                 <form method="post" style="display:inline">
                                     <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="admin_unblock">
                                     <input type="hidden" name="user_id" value="<?= (int)$u['user_id'] ?>">
                                     <button class="btn outline small">🔓 Разблокировать</button>
                                 </form>
+                                <?php if ($u['status_code'] === 'blocked'): ?>
                                 <form method="post" style="display:inline" onsubmit="return confirm('Удалить пользователя?')">
                                     <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="admin_delete_user">
                                     <input type="hidden" name="user_id" value="<?= (int)$u['user_id'] ?>">
                                     <button class="btn danger small">🗑 Удалить</button>
                                 </form>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <form method="post" style="display:inline" onsubmit="return confirm('Заблокировать?')">
                                     <?= csrf_field() ?>
@@ -980,7 +1222,6 @@ elseif ($page === 'admin_car_form'):
                     </select>
                 </div>
 
-                <!-- Загрузка изображения -->
                 <div class="field" style="grid-column: 1 / -1">
                     <label>Фотография автомобиля</label>
 
@@ -1011,6 +1252,94 @@ elseif ($page === 'admin_car_form'):
                 </button>
             </div>
         </form>
+    </div>
+
+<?php admin_layout_end(); ?>
+
+<?php
+/* ============================================================
+   ADMIN — ЗАМЕТКИ (API /notes) + выпадающее меню скачивания
+   ============================================================ */
+elseif ($page === 'admin_notes'):
+
+    $notes = [];
+    $dbError = null;
+    try {
+        $st = db()->query("
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+            ORDER BY n.id
+        ");
+        $notes = $st->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        $dbError = $e->getMessage();
+    }
+
+    admin_layout_start('notes', $user, 'Заметки (API)', 'Данные GET /notes');
+?>
+
+    <?php if ($dbError): ?>
+        <div class="alert err">Ошибка БД: <?= e($dbError) ?></div>
+    <?php endif; ?>
+
+    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:20px">
+
+        <a href="index.php?page=admin_notes" class="btn ghost small">↻ Обновить</a>
+
+        <!-- Выпадающий список + кнопка Скачать -->
+        <form method="get" action="index.php" style="display:flex; gap:8px; align-items:center; margin:0">
+            <input type="hidden" name="page" value="admin_notes_download">
+
+            <select name="format" class="btn ghost small"
+                    style="appearance:none; padding:8px 32px 8px 14px; cursor:pointer;
+                           background-image:linear-gradient(45deg, transparent 50%, #8b95ab 50%),
+                                            linear-gradient(135deg, #8b95ab 50%, transparent 50%);
+                           background-position: calc(100% - 18px) 50%, calc(100% - 13px) 50%;
+                           background-size: 5px 5px, 5px 5px;
+                           background-repeat: no-repeat;">
+                <option value="json">📄 JSON</option>
+                <option value="csv">📊 CSV</option>
+                <option value="xml">🧩 XML</option>
+                <option value="sql">🗄 SQL</option>
+            </select>
+
+            <button type="submit" class="btn primary small">⬇ Скачать</button>
+        </form>
+
+        <a href="/notes" target="_blank" class="btn outline small">🔗 Открыть API /notes</a>
+    </div>
+
+    <div class="admin-card">
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>title_user</th>
+                    <th>content</th>
+                    <th>formatted_date</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($notes as $n): ?>
+                <tr>
+                    <td><code class="vin"><?= e($n['id']) ?></code></td>
+                    <td><b><?= e($n['title_user']) ?></b></td>
+                    <td><?= e($n['content']) ?></td>
+                    <td><span class="badge green"><?= e($n['formatted_date']) ?></span></td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$notes): ?>
+                <tr><td colspan="4" class="text-center text-muted" style="padding:40px">
+                    Заметок пока нет. Добавьте записи в таблицу <code>notes</code>.
+                </td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
     </div>
 
 <?php admin_layout_end(); ?>

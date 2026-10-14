@@ -1,0 +1,354 @@
+{
+  "info": {
+    "_postman_id": "b8f3a1c2-4d5e-4f6a-9b7c-1e2d3f4a5b6c",
+    "name": "Notes API — КИМ 09.02.07-5-2027",
+    "description": "Тесты для API GET /notes: 200, 400, 500, валидность JSON.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:3000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. GET /notes — 200 OK + валидный JSON",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// --- Тест 1: статус 200 ---",
+              "pm.test(\"Статус 200 при штатной работе\", function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "// --- Тест 2: валидность JSON ---",
+              "pm.test(\"Ответ в формате JSON\", function () {",
+              "    pm.response.to.be.json;",
+              "});",
+              "",
+              "pm.test(\"Тело ответа — массив\", function () {",
+              "    const json = pm.response.json();",
+              "    pm.expect(json).to.be.an(\"array\");",
+              "});",
+              "",
+              "// --- Тест 3: структура объектов ---",
+              "pm.test(\"Каждый объект содержит обязательные поля\", function () {",
+              "    const json = pm.response.json();",
+              "    json.forEach(item => {",
+              "        pm.expect(item).to.have.property(\"id\");",
+              "        pm.expect(item).to.have.property(\"title_user\");",
+              "        pm.expect(item).to.have.property(\"content\");",
+              "        pm.expect(item).to.have.property(\"formatted_date\");",
+              "    });",
+              "});",
+              "",
+              "// --- Тест 4: формат даты ДД.ММ.ГГГГ ---",
+              "pm.test(\"formatted_date в формате ДД.ММ.ГГГГ\", function () {",
+              "    const re = /^\\\\d{2}\\\\.\\\\d{2}\\\\.\\\\d{4}$/;",
+              "    pm.response.json().forEach(i => pm.expect(i.formatted_date).to.match(re));",
+              "});",
+              "",
+              "// --- Тест 5: формат title_user ---",
+              "pm.test(\"title_user в формате '{title} - {login}'\", function () {",
+              "    const re = /^.+ - .+$/;",
+              "    pm.response.json().forEach(i => pm.expect(i.title_user).to.match(re));",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes",
+          "host": ["{{base_url}}"],
+          "path": ["notes"]
+        },
+        "description": "Штатный запрос. Проверяет 200 OK, валидный JSON, поля и форматы."
+      }
+    },
+    {
+      "name": "2. GET /notes?limit=abc — 400 Bad Request",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 400 при некорректном параметре\", function () {",
+              "    pm.response.to.have.status(400);",
+              "});",
+              "",
+              "pm.test(\"Тело содержит error\", function () {",
+              "    const json = pm.response.json();",
+              "    pm.expect(json).to.have.property(\"error\");",
+              "});",
+              "",
+              "pm.test(\"Ответ — валидный JSON\", function () {",
+              "    pm.response.to.be.json;",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes?limit=abc",
+          "host": ["{{base_url}}"],
+          "path": ["notes"],
+          "query": [
+            { "key": "limit", "value": "abc" }
+          ]
+        },
+        "description": "Некорректное значение параметра → 400 Bad Request."
+      }
+    },
+    {
+      "name": "3. GET /notes?foo=bar — 400 (лишний параметр)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 400 при неизвестном параметре\", function () {",
+              "    pm.response.to.have.status(400);",
+              "});",
+              "",
+              "pm.test(\"Тело содержит error\", function () {",
+              "    pm.expect(pm.response.json()).to.have.property(\"error\");",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes?foo=bar",
+          "host": ["{{base_url}}"],
+          "path": ["notes"],
+          "query": [
+            { "key": "foo", "value": "bar" }
+          ]
+        },
+        "description": "Неизвестный параметр → 400 Bad Request."
+      }
+    },
+    {
+      "name": "4. GET /notes?limit[]=1 — 400 (неверный тип)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 400 при неверном типе параметра\", function () {",
+              "    pm.response.to.have.status(400);",
+              "});",
+              "",
+              "pm.test(\"Тело содержит error\", function () {",
+              "    pm.expect(pm.response.json()).to.have.property(\"error\");",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes?limit[]=1",
+          "host": ["{{base_url}}"],
+          "path": ["notes"],
+          "query": [
+            { "key": "limit[]", "value": "1" }
+          ]
+        },
+        "description": "Массив в параметре → неверный тип → 400 Bad Request."
+      }
+    },
+    {
+      "name": "5. POST /notes — 400 (неверный метод)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 400 при не-GET методе\", function () {",
+              "    pm.response.to.have.status(400);",
+              "});",
+              "",
+              "pm.test(\"Тело — валидный JSON\", function () {",
+              "    pm.response.to.be.json;",
+              "});",
+              "",
+              "pm.test(\"Тело содержит error\", function () {",
+              "    pm.expect(pm.response.json()).to.have.property(\"error\");",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{}"
+        },
+        "url": {
+          "raw": "{{base_url}}/notes",
+          "host": ["{{base_url}}"],
+          "path": ["notes"]
+        },
+        "description": "Разрешён только GET → 400 Bad Request."
+      }
+    },
+    {
+      "name": "6. GET /notes — 500 Internal Server Error",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 500 при внутренней ошибке сервера\", function () {",
+              "    pm.response.to.have.status(500);",
+              "});",
+              "",
+              "pm.test(\"Тело содержит сообщение об ошибке подключения к БД\", function () {",
+              "    const json = pm.response.json();",
+              "    pm.expect(json).to.have.property(\"error\");",
+              "    pm.expect(json.error).to.include(\"баз\");",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes",
+          "host": ["{{base_url}}"],
+          "path": ["notes"]
+        },
+        "description": "⚠️ Запускать при выключенном MySQL или с неверным DB_HOST в config.php. Проверяет 500 + сообщение об ошибке."
+      }
+    },
+    {
+      "name": "7. GET /notes — 200 + [] (пустая таблица)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200, даже если данных нет\", function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test(\"Тело — валидный JSON-массив\", function () {",
+              "    pm.response.to.be.json;",
+              "    pm.expect(pm.response.json()).to.be.an(\"array\");",
+              "});",
+              "",
+              "pm.test(\"Массив пустой\", function () {",
+              "    pm.expect(pm.response.json().length).to.equal(0);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes",
+          "host": ["{{base_url}}"],
+          "path": ["notes"]
+        },
+        "description": "⚠️ Перед запуском выполните TRUNCATE TABLE notes;. Проверяет 200 OK и пустой массив []."
+      }
+    },
+    {
+      "name": "8. GET /notes?limit=2 — 200 (лимит)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test(\"Вернулось не более 2 записей\", function () {",
+              "    const json = pm.response.json();",
+              "    pm.expect(json).to.be.an(\"array\");",
+              "    pm.expect(json.length).to.be.at.most(2);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/notes?limit=2",
+          "host": ["{{base_url}}"],
+          "path": ["notes"],
+          "query": [
+            { "key": "limit", "value": "2" }
+          ]
+        },
+        "description": "Корректный параметр limit → 200 и не более 2 записей."
+      }
+    },
+    {
+      "name": "9. GET /api/notes — 200 (алиас)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"Статус 200\", function () {",
+              "    pm.response.to.have.status(200);",
+              "});",
+              "",
+              "pm.test(\"Ответ — валидный JSON-массив\", function () {",
+              "    pm.response.to.be.json;",
+              "    pm.expect(pm.response.json()).to.be.an(\"array\");",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/notes",
+          "host": ["{{base_url}}"],
+          "path": ["api", "notes"]
+        },
+        "description": "Проверка алиаса /api/notes."
+      }
+    }
+  ]
+}
