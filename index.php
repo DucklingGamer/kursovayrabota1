@@ -7,6 +7,129 @@
 require __DIR__ . '/config.php';
 require __DIR__ . '/functions.php';
 
+/* ============================================================
+   API: GET /notes  и  GET /api/notes
+   КИМ 09.02.07-5-2027
+   ============================================================ */
+$reqUri = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+if (in_array(rtrim($reqUri, '/'), ['/notes', '/api/notes'], true)) {
+
+    header('Content-Type: application/json; charset=utf-8');
+
+    if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET') {
+        http_response_code(400);
+        echo json_encode(['error' => 'Некорректный запрос: разрешён только GET'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+
+    $allowedParams = ['limit', 'id_user'];
+    foreach ($_GET as $key => $value) {
+        if (!in_array($key, $allowedParams, true)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Некорректный параметр: $key"], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        if (is_array($value)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Некорректный тип параметра: $key"], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+        if ($value !== '' && (!ctype_digit((string)$value) || (int)$value <= 0)) {
+            http_response_code(400);
+            echo json_encode(['error' => "Некорректное значение параметра: $key"], JSON_UNESCAPED_UNICODE);
+            exit;
+        }
+    }
+
+    try {
+        $sql = "
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+        ";
+        $params = [];
+        if (!empty($_GET['id_user'])) {
+            $sql .= " WHERE n.id_user = ?";
+            $params[] = (int)$_GET['id_user'];
+        }
+        $sql .= " ORDER BY n.id";
+        if (!empty($_GET['limit'])) {
+            $sql .= " LIMIT " . (int)$_GET['limit'];
+        }
+
+        $st = db()->prepare($sql);
+        $st->execute($params);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        http_response_code(200);
+        echo json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+
+    } catch (Throwable $e) {
+        http_response_code(500);
+        echo json_encode(['error' => 'Ошибка подключения к базе данных'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+/* ============================================================
+   СКАЧИВАНИЕ API /notes — только JSON
+   ============================================================ */
+if (($_GET['page'] ?? '') === 'admin_notes_download') {
+
+    $u = current_user();
+    if (!$u || $u['role_code'] !== 'admin') {
+        http_response_code(403);
+        exit('Доступ запрещён');
+    }
+
+    try {
+        $st = db()->query("
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+            ORDER BY n.id
+        ");
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC);
+
+        $filename = 'api_notes_' . date('Y-m-d_His') . '.json';
+
+        header('Content-Type: application/json; charset=utf-8');
+        header('Content-Disposition: attachment; filename="' . $filename . '"');
+        echo json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        exit;
+
+    } catch (Throwable $e) {
+        http_response_code(500);
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(['error' => 'Ошибка подключения к базе данных'], JSON_UNESCAPED_UNICODE);
+        exit;
+    }
+}
+
+/* ============================================================
+   АВТОСБРОС ПРОСРОЧЕННЫХ БЛОКИРОВОК (15 минут)
+   ============================================================ */
+try {
+    db()->exec('
+        UPDATE user
+        SET failed_attempts = 0,
+            locked_until    = NULL
+        WHERE locked_until IS NOT NULL
+          AND locked_until <= NOW()
+    ');
+} catch (Throwable $e) {
+    // не критично
+}
+
 $page   = get('page', '');
 $action = post('action', get('action', ''));
 
@@ -19,6 +142,52 @@ if ($action === 'logout') {
     if ($u) log_action($u['login'], 'Выход из системы', (int)$u['user_id']);
     session_destroy();
     redirect('index.php?page=login');
+}
+
+/* ---------- Заявка на покупку автомобиля ---------- */
+if ($action === 'car_request' && is_post()) {
+    csrf_check();
+
+    $carId = (int)post('car_id');
+    $name  = trim(post('name'));
+    $phone = trim(post('phone'));
+    $cmt   = trim(post('comment'));
+
+    $errors = [];
+    if ($carId <= 0)   $errors[] = 'Выберите автомобиль';
+    if ($name === '')  $errors[] = 'Укажите имя';
+    if ($phone === '') $errors[] = 'Укажите телефон';
+
+    if (!$errors) {
+        $st = db()->prepare('SELECT 1 FROM car WHERE car_id = ? AND deleted_at IS NULL');
+        $st->execute([$carId]);
+        if (!$st->fetch()) $errors[] = 'Автомобиль не найден';
+    }
+
+    if ($errors) {
+        $_SESSION['request_error'] = implode('. ', $errors);
+        redirect('index.php?page=home');
+    }
+
+    try {
+        db()->prepare('
+            INSERT INTO purchase_request (car_id, client_name, client_phone, comment, user_id)
+            VALUES (?, ?, ?, ?, ?)
+        ')->execute([
+            $carId,
+            $name,
+            $phone,
+            $cmt ?: null,
+            $_SESSION['user_id'] ?? null,
+        ]);
+
+        log_action($name, "Заявка на покупку: car_id=$carId, тел=$phone");
+        $_SESSION['request_ok'] = 'Заявка отправлена! Наш менеджер свяжется с вами.';
+    } catch (PDOException $e) {
+        $_SESSION['request_error'] = 'Не удалось сохранить заявку. Попробуйте позже.';
+    }
+
+    redirect('index.php?page=home');
 }
 
 // ---------- Вход ----------
@@ -40,7 +209,9 @@ if ($action === 'login' && is_post()) {
     }
 
     $st = db()->prepare('
-        SELECT u.user_id, u.password_hash, s.code AS status_code
+        SELECT u.user_id, u.password_hash,
+               u.failed_attempts, u.locked_until,
+               s.code AS status_code
         FROM user u
         JOIN user_status s ON s.status_id = u.status_id
         WHERE u.login = ?
@@ -57,21 +228,64 @@ if ($action === 'login' && is_post()) {
         redirect('index.php?page=login');
     }
     if ($u['status_code'] === 'blocked') {
-        $_SESSION['login_error'] = 'Аккаунт заблокирован';
+        $_SESSION['login_error'] = 'Аккаунт заблокирован администратором';
         redirect('index.php?page=login');
     }
+
+    if (!empty($u['locked_until'])) {
+        $lockedUntil = strtotime($u['locked_until']);
+        $now         = time();
+
+        if ($lockedUntil > $now) {
+            $leftMin = (int)ceil(($lockedUntil - $now) / 60);
+            $_SESSION['login_error'] = "Слишком много неудачных попыток. Попробуйте через {$leftMin} мин.";
+            redirect('index.php?page=login');
+        } else {
+            db()->prepare('UPDATE user SET failed_attempts = 0, locked_until = NULL WHERE user_id = ?')
+                ->execute([(int)$u['user_id']]);
+            $u['failed_attempts'] = 0;
+            $u['locked_until']    = null;
+        }
+    }
+
     if (!password_verify($password, $u['password_hash'])) {
-        db()->prepare('UPDATE user SET failed_attempts = failed_attempts + 1 WHERE user_id = ?')
-            ->execute([$u['user_id']]);
-        log_action($login, 'Неудачная попытка входа', (int)$u['user_id']);
-        $_SESSION['login_error'] = 'Неверный логин или пароль';
+
+        $attempts = (int)$u['failed_attempts'] + 1;
+
+        if ($attempts >= 3) {
+            db()->prepare('
+                UPDATE user
+                SET failed_attempts = 0,
+                    locked_until    = DATE_ADD(NOW(), INTERVAL 15 MINUTE)
+                WHERE user_id = ?
+            ')->execute([(int)$u['user_id']]);
+
+            log_action($login, 'Аккаунт заблокирован на 15 минут (3 неудачных попытки)', (int)$u['user_id']);
+            $_SESSION['login_error'] = 'Слишком много неудачных попыток. Аккаунт заблокирован на 15 минут.';
+            redirect('index.php?page=login');
+        }
+
+        db()->prepare('UPDATE user SET failed_attempts = ? WHERE user_id = ?')
+            ->execute([$attempts, (int)$u['user_id']]);
+
+        log_action($login, "Неудачная попытка входа ($attempts/3)", (int)$u['user_id']);
+
+        $left = 3 - $attempts;
+        $_SESSION['login_error'] = "Неверный логин или пароль. Осталось попыток: $left";
         redirect('index.php?page=login');
     }
 
     $_SESSION['user_id'] = (int)$u['user_id'];
     unset($_SESSION['captcha_order']);
-    db()->prepare('UPDATE user SET failed_attempts = 0, last_login_at = NOW() WHERE user_id = ?')
-        ->execute([(int)$u['user_id']]);
+
+    db()->prepare('
+        UPDATE user
+        SET failed_attempts = 0,
+            locked_until    = NULL,
+            last_login_at   = NOW()
+        WHERE user_id = ?
+    ')->execute([(int)$u['user_id']]);
+
     log_action($login, 'Успешный вход', (int)$u['user_id']);
 
     $role = db()->prepare('SELECT r.code FROM user u JOIN user_role r ON r.role_id = u.role_id WHERE u.user_id = ?');
@@ -172,6 +386,7 @@ if ($action === 'profile_update' && is_post()) {
     redirect('index.php?page=profile');
 }
 
+// ---------- Смена пароля (с проверкой, что новый ≠ текущий) ----------
 if ($action === 'profile_password' && is_post()) {
     csrf_check(); $u = require_login();
     $current = post('current_password');
@@ -182,6 +397,10 @@ if ($action === 'profile_password' && is_post()) {
     if (!password_verify($current, $u['password_hash'])) $err[] = 'Текущий пароль неверный';
     if (strlen($new) < 6) $err[] = 'Новый пароль — минимум 6 символов';
     if ($new !== $new2)   $err[] = 'Новые пароли не совпадают';
+
+    if (empty($err) && password_verify($new, $u['password_hash'])) {
+        $err[] = 'Новый пароль совпадает с текущим. Придумайте другой.';
+    }
 
     if ($err) {
         $_SESSION['profile_error'] = implode('. ', $err);
@@ -324,7 +543,6 @@ if ($action === 'car_save' && is_post()) {
         redirect('index.php?page=admin_car_form' . ($id ? "&id=$id" : ''));
     }
 
-    // --- Загрузка картинки ---
     $newImagePath = null;
     $oldImagePath = null;
 
@@ -344,7 +562,6 @@ if ($action === 'car_save' && is_post()) {
         }
     }
 
-    // Хотим удалить текущую картинку
     $removeImage = post('remove_image') === '1';
     if ($removeImage && $oldImagePath && !$newImagePath) {
         delete_car_image($oldImagePath);
@@ -392,12 +609,27 @@ if ($action === 'car_delete' && is_post()) {
     redirect('index.php?page=admin_cars');
 }
 
+// ---------- Смена статуса заявки ----------
+if ($action === 'request_set_status' && is_post()) {
+    csrf_check(); require_admin();
+    $rid    = (int)post('request_id');
+    $status = post('status');
+
+    $allowed = ['new','in_progress','done','rejected'];
+    if (in_array($status, $allowed, true)) {
+        db()->prepare('UPDATE purchase_request SET status = ? WHERE request_id = ?')
+            ->execute([$status, $rid]);
+        log_action('admin', "Заявка #$rid → статус $status", (int)$_SESSION['user_id']);
+    }
+    redirect('index.php?page=admin_requests');
+}
+
 /* ============================================================
    ROUTING
    ============================================================ */
 $user = current_user();
 $authPages   = ['login', 'register'];
-$adminPages  = ['admin', 'admin_cars', 'admin_car_form', 'admin_logs', 'admin_users'];
+$adminPages  = ['admin', 'admin_cars', 'admin_car_form', 'admin_logs', 'admin_users', 'admin_notes', 'admin_notes_download', 'admin_requests'];
 $userPages   = ['profile'];
 $publicPages = ['home','cars','about','promo','contacts','dashboard'];
 
@@ -525,6 +757,8 @@ function admin_layout_start(string $active, array $user, string $title, string $
     echo '<nav class="admin-nav">';
     echo '<a href="index.php?page=admin" class="' . ($active==='users'?'active':'') . '">👥 Пользователи</a>';
     echo '<a href="index.php?page=admin_cars" class="' . ($active==='cars'?'active':'') . '">🚗 Автомобили</a>';
+    echo '<a href="index.php?page=admin_requests" class="' . ($active==='requests'?'active':'') . '">📨 Заявки на покупку</a>';
+    echo '<a href="index.php?page=admin_notes" class="' . ($active==='notes'?'active':'') . '">📝 Заметки (API)</a>';
     echo '<a href="index.php?page=admin_logs" class="' . ($active==='logs'?'active':'') . '">📋 Журнал действий</a>';
     echo '<div class="admin-nav-sep"></div>';
     echo '<a href="index.php?page=profile">👤 Мой профиль</a>';
@@ -570,6 +804,8 @@ if ($page === 'profile'):
             <?php if ($isAdmin): ?>
                 <a href="index.php?page=admin">👥 Пользователи</a>
                 <a href="index.php?page=admin_cars">🚗 Автомобили</a>
+                <a href="index.php?page=admin_requests">📨 Заявки на покупку</a>
+                <a href="index.php?page=admin_notes">📝 Заметки (API)</a>
                 <a href="index.php?page=admin_logs">📋 Журнал действий</a>
                 <div class="admin-nav-sep"></div>
             <?php else: ?>
@@ -647,7 +883,7 @@ if ($page === 'profile'):
         <?php elseif ($tab === 'password'): ?>
             <div class="admin-card admin-form-card">
                 <h3>Смена пароля</h3>
-                <p class="text-dim mb-3">Пароль должен быть минимум 6 символов.</p>
+                <p class="text-dim mb-3">Пароль должен быть минимум 6 символов и отличаться от текущего.</p>
                 <form method="post" action="index.php" class="admin-form">
                     <?= csrf_field() ?>
                     <input type="hidden" name="action" value="profile_password">
@@ -693,6 +929,7 @@ if ($page === 'profile'):
                         <tr><td><b>Последний вход</b></td><td><?= e($user['last_login_at'] ?? '—') ?></td></tr>
                         <tr><td><b>Пароль изменён</b></td><td><?= e($user['password_changed_at'] ?? '—') ?></td></tr>
                         <tr><td><b>Неудачных попыток</b></td><td><?= (int)$user['failed_attempts'] ?></td></tr>
+                        <tr><td><b>Заблокирован до</b></td><td><?= e($user['locked_until'] ?? '—') ?></td></tr>
                     </tbody>
                 </table>
                 <div class="admin-form-actions">
@@ -712,7 +949,7 @@ elseif ($page === 'admin' || $page === 'admin_users'):
         SELECT u.user_id, u.login, u.fio, u.email,
                r.name AS role_name, r.code AS role_code,
                s.code AS status_code, s.name AS status_name,
-               u.created_at
+               u.created_at, u.locked_until, u.failed_attempts
         FROM user u
         JOIN user_role   r ON r.role_id   = u.role_id
         JOIN user_status s ON s.status_id = u.status_id
@@ -784,8 +1021,13 @@ elseif ($page === 'admin' || $page === 'admin_users'):
                                 'deleted' => 'gray',
                                 default   => 'gray',
                             };
+
+                            $tempLocked = !empty($u['locked_until']) && strtotime($u['locked_until']) > time();
                         ?>
                         <span class="badge <?= $cls ?>"><?= e($u['status_name']) ?></span>
+                        <?php if ($tempLocked): ?>
+                            <br><span class="badge red" style="margin-top:6px">⏱ до <?= e(date('H:i', strtotime($u['locked_until']))) ?></span>
+                        <?php endif; ?>
                     </td>
                     <td><?= e(date('d.m.Y', strtotime($u['created_at']))) ?></td>
                     <td class="row-actions">
@@ -816,19 +1058,21 @@ elseif ($page === 'admin' || $page === 'admin_users'):
                                     <input type="hidden" name="user_id" value="<?= (int)$u['user_id'] ?>">
                                     <button class="btn ghost small">↺ Восстановить</button>
                                 </form>
-                            <?php elseif ($u['status_code'] === 'blocked'): ?>
+                            <?php elseif ($u['status_code'] === 'blocked' || $tempLocked): ?>
                                 <form method="post" style="display:inline">
                                     <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="admin_unblock">
                                     <input type="hidden" name="user_id" value="<?= (int)$u['user_id'] ?>">
                                     <button class="btn outline small">🔓 Разблокировать</button>
                                 </form>
+                                <?php if ($u['status_code'] === 'blocked'): ?>
                                 <form method="post" style="display:inline" onsubmit="return confirm('Удалить пользователя?')">
                                     <?= csrf_field() ?>
                                     <input type="hidden" name="action" value="admin_delete_user">
                                     <input type="hidden" name="user_id" value="<?= (int)$u['user_id'] ?>">
                                     <button class="btn danger small">🗑 Удалить</button>
                                 </form>
+                                <?php endif; ?>
                             <?php else: ?>
                                 <form method="post" style="display:inline" onsubmit="return confirm('Заблокировать?')">
                                     <?= csrf_field() ?>
@@ -980,7 +1224,6 @@ elseif ($page === 'admin_car_form'):
                     </select>
                 </div>
 
-                <!-- Загрузка изображения -->
                 <div class="field" style="grid-column: 1 / -1">
                     <label>Фотография автомобиля</label>
 
@@ -1011,6 +1254,153 @@ elseif ($page === 'admin_car_form'):
                 </button>
             </div>
         </form>
+    </div>
+
+<?php admin_layout_end(); ?>
+
+<?php
+/* ============================================================
+   ADMIN — ЗАЯВКИ НА ПОКУПКУ
+   ============================================================ */
+elseif ($page === 'admin_requests'):
+
+    $requests = db()->query('
+        SELECT r.*, c.brand, c.model, c.year, c.price
+        FROM purchase_request r
+        JOIN car c ON c.car_id = r.car_id
+        ORDER BY r.created_at DESC
+        LIMIT 200
+    ')->fetchAll();
+
+    admin_layout_start('requests', $user, 'Заявки на покупку', 'Всего: ' . count($requests));
+?>
+
+    <div class="admin-card">
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>Дата</th>
+                    <th>Автомобиль</th>
+                    <th>Клиент</th>
+                    <th>Телефон</th>
+                    <th>Комментарий</th>
+                    <th>Статус</th>
+                    <th style="text-align:right">Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($requests as $r): ?>
+                <tr>
+                    <td><span class="text-dim"><?= e($r['created_at']) ?></span></td>
+                    <td>
+                        <b><?= e($r['brand']) ?> <?= e($r['model']) ?></b>
+                        <div class="text-dim" style="font-size:12px">
+                            <?= (int)$r['year'] ?> · <?= number_format((float)$r['price'],0,',',' ') ?> ₽
+                        </div>
+                    </td>
+                    <td><b><?= e($r['client_name']) ?></b></td>
+                    <td><?= e($r['client_phone']) ?></td>
+                    <td><?= e($r['comment'] ?? '—') ?></td>
+                    <td>
+                        <?php
+                            $cls = match($r['status']) {
+                                'new'         => 'yellow',
+                                'in_progress' => 'gray',
+                                'done'        => 'green',
+                                'rejected'    => 'red',
+                                default       => 'gray',
+                            };
+                        ?>
+                        <span class="badge <?= $cls ?>"><?= e($r['status']) ?></span>
+                    </td>
+                    <td class="row-actions">
+                        <form method="post" style="display:inline">
+                            <?= csrf_field() ?>
+                            <input type="hidden" name="action" value="request_set_status">
+                            <input type="hidden" name="request_id" value="<?= (int)$r['request_id'] ?>">
+                            <select name="status" onchange="this.form.submit()"
+                                    style="background:var(--bg-darker); border:1px solid var(--border); border-radius:4px; color:var(--text); padding:6px 10px; font-size:12px">
+                                <option value="new"         <?= $r['status']==='new'?'selected':'' ?>>Новая</option>
+                                <option value="in_progress" <?= $r['status']==='in_progress'?'selected':'' ?>>В работе</option>
+                                <option value="done"        <?= $r['status']==='done'?'selected':'' ?>>Выполнена</option>
+                                <option value="rejected"    <?= $r['status']==='rejected'?'selected':'' ?>>Отклонена</option>
+                            </select>
+                        </form>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$requests): ?>
+                <tr><td colspan="7" class="text-center text-muted" style="padding:40px">Заявок пока нет</td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+
+<?php admin_layout_end(); ?>
+
+<?php
+/* ============================================================
+   ADMIN — ЗАМЕТКИ (API /notes)
+   ============================================================ */
+elseif ($page === 'admin_notes'):
+
+    $notes = [];
+    $dbError = null;
+    try {
+        $st = db()->query("
+            SELECT
+                n.id                                  AS id,
+                CONCAT(n.title, ' - ', u.login)       AS title_user,
+                n.content                             AS content,
+                DATE_FORMAT(n.created_at, '%d.%m.%Y') AS formatted_date
+            FROM notes n
+            JOIN users u ON u.id = n.id_user
+            ORDER BY n.id
+        ");
+        $notes = $st->fetchAll(PDO::FETCH_ASSOC);
+    } catch (PDOException $e) {
+        $dbError = $e->getMessage();
+    }
+
+    admin_layout_start('notes', $user, 'Заметки (API)', 'Данные GET /notes');
+?>
+
+    <?php if ($dbError): ?>
+        <div class="alert err">Ошибка БД: <?= e($dbError) ?></div>
+    <?php endif; ?>
+
+    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:20px">
+        <a href="index.php?page=admin_notes" class="btn ghost small">↻ Обновить</a>
+        <a href="index.php?page=admin_notes_download" class="btn primary small">⬇ Скачать JSON</a>
+        <a href="/notes" target="_blank" class="btn outline small">🔗 Открыть API /notes</a>
+    </div>
+
+    <div class="admin-card">
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>title_user</th>
+                    <th>content</th>
+                    <th>formatted_date</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($notes as $n): ?>
+                <tr>
+                    <td><code class="vin"><?= e($n['id']) ?></code></td>
+                    <td><b><?= e($n['title_user']) ?></b></td>
+                    <td><?= e($n['content']) ?></td>
+                    <td><span class="badge green"><?= e($n['formatted_date']) ?></span></td>
+                </tr>
+            <?php endforeach; ?>
+            <?php if (!$notes): ?>
+                <tr><td colspan="4" class="text-center text-muted" style="padding:40px">
+                    Заметок пока нет. Добавьте записи в таблицу <code>notes</code>.
+                </td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
     </div>
 
 <?php admin_layout_end(); ?>
@@ -1089,6 +1479,16 @@ else: ?>
 <?php
 if ($page === 'home' || $page === 'dashboard'):
     $cars = db()->query('SELECT * FROM car WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 8')->fetchAll();
+
+    // Список для формы заявки
+    $requestCars = db()->query('
+        SELECT car_id, brand, model, year, price
+        FROM car WHERE deleted_at IS NULL
+        ORDER BY brand, model
+    ')->fetchAll();
+
+    $reqErr = $_SESSION['request_error'] ?? null; unset($_SESSION['request_error']);
+    $reqOk  = $_SESSION['request_ok']    ?? null; unset($_SESSION['request_ok']);
 ?>
 <section class="hero-photo">
     <div class="hero-photo-bg" style="background-image:url('assets/hero.jpg')"></div>
@@ -1165,10 +1565,10 @@ if ($page === 'home' || $page === 'dashboard'):
         <span class="kicker-gold">НАШИ АВТОМОБИЛИ</span>
         <h2>КАТАЛОГ АВТОМОБИЛЕЙ</h2>
         <div class="filters">
-            <button class="filter-btn active">ВСЕ</button>
-            <button class="filter-btn">СЕДАН</button>
-            <button class="filter-btn">КРОССОВЕР</button>
-            <button class="filter-btn">ВНЕДОРОЖНИК</button>
+            <a href="index.php?page=cars" class="filter-btn active">ВСЕ</a>
+            <a href="index.php?page=cars&body=<?= urlencode('Седан') ?>" class="filter-btn">СЕДАН</a>
+            <a href="index.php?page=cars&body=<?= urlencode('Кроссовер') ?>" class="filter-btn">КРОССОВЕР</a>
+            <a href="index.php?page=cars&body=<?= urlencode('Внедорожник') ?>" class="filter-btn">ВНЕДОРОЖНИК</a>
         </div>
         <div class="cars-grid compact">
             <?php foreach ($cars as $c): ?>
@@ -1206,30 +1606,80 @@ if ($page === 'home' || $page === 'dashboard'):
                     <div class="td-row"><span class="td-ico">✉️</span><div><b>EMAIL</b>info@autocatalog.ru</div></div>
                 </div>
             </div>
-            <form class="td-form" method="post" action="index.php">
-                <h3>Оставить заявку</h3>
-                <div class="field"><label>Ваше имя</label><input type="text" name="name" placeholder="Например, Александр" required></div>
-                <div class="field"><label>Номер телефона</label><input type="tel" name="phone" placeholder="+7 (___) ___-__-__" required></div>
-                <div class="field"><label>Комментарий</label><textarea name="comment" placeholder="Укажите пожелания..."></textarea></div>
-                <button class="btn primary block" type="submit">ОТПРАВИТЬ ЗАЯВКУ</button>
-            </form>
+
+            <div>
+                <?php if ($reqOk):  ?><div class="alert ok"><?= e($reqOk) ?></div><?php endif; ?>
+                <?php if ($reqErr): ?><div class="alert err"><?= e($reqErr) ?></div><?php endif; ?>
+
+                <form class="td-form" method="post" action="index.php">
+                    <?= csrf_field() ?>
+                    <input type="hidden" name="action" value="car_request">
+
+                    <h3>Оставить заявку на покупку</h3>
+
+                    <div class="field">
+                        <label>Автомобиль *</label>
+                        <select name="car_id" required>
+                            <option value="">— выберите автомобиль —</option>
+                            <?php foreach ($requestCars as $rc): ?>
+                                <option value="<?= (int)$rc['car_id'] ?>">
+                                    <?= e($rc['brand']) ?> <?= e($rc['model']) ?>, <?= (int)$rc['year'] ?>
+                                    — <?= number_format((float)$rc['price'],0,',',' ') ?> ₽
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                    </div>
+
+                    <div class="field">
+                        <label>Ваше имя *</label>
+                        <input type="text" name="name" placeholder="Например, Александр" required>
+                    </div>
+
+                    <div class="field">
+                        <label>Номер телефона *</label>
+                        <input type="tel" name="phone" placeholder="+7 (___) ___-__-__" required>
+                    </div>
+
+                    <div class="field">
+                        <label>Комментарий</label>
+                        <textarea name="comment" placeholder="Укажите пожелания..."></textarea>
+                    </div>
+
+                    <button class="btn primary block" type="submit">ОТПРАВИТЬ ЗАЯВКУ</button>
+                </form>
+            </div>
         </div>
     </div>
 </section>
 
 <?php elseif ($page === 'cars'):
-    $cars = db()->query('SELECT * FROM car WHERE deleted_at IS NULL ORDER BY created_at DESC')->fetchAll();
+    $allowedBodies = ['Седан','Кроссовер','Внедорожник','Хэтчбек','Купе','Универсал'];
+    $body = trim(get('body', ''));
+
+    if ($body !== '' && in_array($body, $allowedBodies, true)) {
+        $st = db()->prepare('SELECT * FROM car WHERE deleted_at IS NULL AND body_type = ? ORDER BY created_at DESC');
+        $st->execute([$body]);
+        $cars = $st->fetchAll();
+    } else {
+        $body = '';
+        $cars = db()->query('SELECT * FROM car WHERE deleted_at IS NULL ORDER BY created_at DESC')->fetchAll();
+    }
 ?>
 <section class="section">
     <div class="section-inner">
         <span class="kicker-gold">НАШИ АВТОМОБИЛИ</span>
         <h2>КАТАЛОГ АВТОМОБИЛЕЙ</h2>
+
         <div class="filters">
-            <button class="filter-btn active">ВСЕ</button>
-            <button class="filter-btn">СЕДАН</button>
-            <button class="filter-btn">КРОССОВЕР</button>
-            <button class="filter-btn">ВНЕДОРОЖНИК</button>
+            <a href="index.php?page=cars" class="filter-btn <?= $body === '' ? 'active' : '' ?>">ВСЕ</a>
+            <?php foreach ($allowedBodies as $b): ?>
+                <a href="index.php?page=cars&body=<?= urlencode($b) ?>"
+                   class="filter-btn <?= $body === $b ? 'active' : '' ?>">
+                    <?= e(mb_strtoupper($b)) ?>
+                </a>
+            <?php endforeach; ?>
         </div>
+
         <div class="cars-grid">
             <?php foreach ($cars as $c): ?>
             <div class="car-card">
@@ -1244,11 +1694,17 @@ if ($page === 'home' || $page === 'dashboard'):
                     <div class="car-meta">
                         <?php if ($c['color']): ?><span><?= e($c['color']) ?></span><?php endif; ?>
                         <?php if ($c['power_hp']): ?><span><?= (int)$c['power_hp'] ?> л.с.</span><?php endif; ?>
+                        <?php if ($c['body_type']): ?><span><?= e($c['body_type']) ?></span><?php endif; ?>
                     </div>
                     <div class="car-price"><?= number_format((float)$c['price'],0,',',' ') ?> ₽</div>
                 </div>
             </div>
             <?php endforeach; ?>
+            <?php if (!$cars): ?>
+                <div style="grid-column:1/-1; text-align:center; padding:40px; color:var(--text-dim)">
+                    Автомобилей с таким типом кузова пока нет.
+                </div>
+            <?php endif; ?>
         </div>
     </div>
 </section>
