@@ -1,9 +1,4 @@
 <?php
-// ============================================================
-//  config.php — настройки и подключение к MariaDB
-//  Проект: АС «Автокаталог»
-// ============================================================
-
 define('DB_HOST', '127.0.0.1');
 define('DB_PORT', '3306');
 define('DB_NAME', 'belov_bd1.2');
@@ -13,9 +8,9 @@ define('DB_CHARSET', 'utf8mb4');
 
 define('SITE_NAME', 'Автокаталог');
 define('MAX_LOGIN_ATTEMPTS', 3);
-define('PASSWORD_LIFETIME_DAYS', 90);       // Смена пароля раз в 3 месяца
-define('LOCKOUT_MINUTES', 60);              // Блокировка на 1 час
-define('AES_KEY', 'change-me-32-bytes-secret-key!!'); // для AES-256
+define('PASSWORD_LIFETIME_DAYS', 90);       
+define('LOCKOUT_MINUTES', 60);              
+define('AES_KEY', 'change-me-32-bytes-secret-key!!');
 
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
